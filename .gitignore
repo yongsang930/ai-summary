@@ -1,9 +1,0 @@
-# Environment variables
-.env
-*.env
-requirements.txt
-batchScript.sql
-logs/
-__pycache__/
-config.py
-.gitignore
