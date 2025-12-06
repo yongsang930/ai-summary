@@ -4,6 +4,9 @@ from typing import Optional, Tuple
 import psycopg2
 import logging
 import google.generativeai as genai
+import requests
+from readability import Document
+from bs4 import BeautifulSoup
 
 
 class AISummaryBatchService:
@@ -17,62 +20,132 @@ class AISummaryBatchService:
     def _get_conn(self):
         return psycopg2.connect(**self.db_config)
 
-    def _gemini_summarize(self, content: str, title: Optional[str] = None, max_retries: int = 3) -> Optional[str]:
-        """Gemini API를 사용하여 콘텐츠를 요약합니다. 429 에러 발생 시 재시도합니다. 실패 시 None을 반환합니다."""
+    def _fetch_url_content(self, url: str) -> Tuple[Optional[str], Optional[int]]:
+        """URL에서 페이지 본문 내용을 가져옵니다. readability-lxml을 사용하여 깔끔하게 추출합니다.
+        
+        Returns:
+            Tuple[Optional[str], Optional[int]]: 
+                - (content, None): 성공
+                - (None, None): 실패 (404가 아닌 에러)
+                - (None, 404): 404 에러 발생
+        """
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            response = requests.get(url, headers=headers, timeout=30)
+            response.raise_for_status()
+            
+            # readability-lxml을 사용하여 본문 추출
+            doc = Document(response.content)
+            content_html = doc.summary()
+            
+            # HTML에서 텍스트만 추출
+            soup = BeautifulSoup(content_html, 'html.parser')
+            content = soup.get_text(separator=' ', strip=True)
+            
+            if content:
+                # 공백 정리 및 길이 제한 (너무 긴 경우)
+                content = ' '.join(content.split())
+                if len(content) > 10000:
+                    content = content[:10000] + "..."
+                return (content, None)
+            
+            return (None, None)
+        except requests.exceptions.HTTPError as e:
+            if e.response and e.response.status_code == 404:
+                self.logger.warning(f"URL 404 에러 ({url}): 페이지를 찾을 수 없습니다.")
+                return (None, 404)
+            else:
+                self.logger.error(f"URL HTTP 에러 ({url}): {str(e)[:200]}")
+                return (None, None)
+        except Exception as e:
+            self.logger.error(f"URL 내용 가져오기 실패 ({url}): {str(e)[:200]}")
+            return (None, None)
+
+    def _gemini_summarize(self, content: str, title: Optional[str] = None) -> Tuple[Optional[str], Optional[float]]:
+        """Gemini API를 사용하여 콘텐츠를 요약합니다.
+        
+        Returns:
+            Tuple[Optional[str], Optional[float]]: 
+                - (summary, None): 성공
+                - (None, None): 실패
+                - (None, retry_delay): 429 에러로 재시도 필요 (retry_delay 초 후 재시도)
+        """
         # 제목이 있으면 프롬프트에 포함
         prompt_content = content
         if title:
             prompt_content = f"제목: {title}\n\n내용: {content}"
 
-        prompt = f"""당신은 기술 블로그 포스트를 간결하고 명확하게 요약하는 전문가입니다. 핵심 내용을 2-3문장으로 요약해주세요.
+        prompt = f"""당신은 한국어 기술 블로그 요약 전문가입니다.
 
-다음 글을 요약해주세요:
+요약 규칙:
+- 2~3개의 짧은 문장으로 요약
+- 목적, 핵심 아이디어, 주요 결과만 정리
+- 불필요하게 길거나 난해한 표현 금지
+- 한 문장은 25~30자 이내로 자연스럽게
+- 마침표로 문장을 명확히 구분
+- 독자가 빠르게 내용을 이해할 수 있도록 단순하고 깔끔하게 작성
+
+아래 글을 요약해주세요:
 
 {prompt_content}"""
 
-        for attempt in range(max_retries):
-            try:
-                # API 요청 전 6초 대기 (첫 요청이 아닌 경우)
-                if attempt > 0:
-                    self.logger.info(f"요약 재시도 {attempt}/{max_retries - 1} - 6초 대기 중...")
-                    time.sleep(6)
+        try:
+            # API 요청 전 6초 대기
+            time.sleep(6)
+            
+            response = self.model.generate_content(prompt)
+            
+            # 성공한 경우
+            summary = response.text.strip()
+            return (summary, None)
+            
+        except Exception as e:
+            error_str = str(e)
+            
+            # 429 에러 (Quota exceeded)인 경우 재시도 지시 반환
+            if "429" in error_str or "quota" in error_str.lower() or "rate limit" in error_str.lower():
+                # 에러 메시지에서 retry_delay 추출 시도
+                retry_delay = 60  # 기본값 60초
+                quota_metric = None
+                quota_limit = None
                 
-                response = self.model.generate_content(prompt)
+                if "retry in" in error_str.lower():
+                    try:
+                        import re
+                        match = re.search(r'retry in ([\d.]+)s', error_str.lower())
+                        if match:
+                            retry_delay = float(match.group(1)) + 1
+                    except:
+                        pass
                 
-                # 성공한 경우 다음 요청을 위해 6초 대기
-                summary = response.text.strip()
-                time.sleep(6)
-                return summary
+                # 할당량 정보 추출
+                try:
+                    import re
+                    metric_match = re.search(r'quota_metric[:\s]+"([^"]+)"', error_str)
+                    if metric_match:
+                        quota_metric = metric_match.group(1)
+                    
+                    limit_match = re.search(r'quota_value[:\s]+(\d+)', error_str)
+                    if limit_match:
+                        quota_limit = limit_match.group(1)
+                except:
+                    pass
                 
-            except Exception as e:
-                error_str = str(e)
+                # 필요한 정보만 로그 기록
+                log_parts = [f"429 에러 발생 (Quota exceeded), 재시도 대기: {retry_delay:.1f}초"]
+                if quota_metric:
+                    log_parts.append(f"할당량 메트릭: {quota_metric}")
+                if quota_limit:
+                    log_parts.append(f"할당량 제한: {quota_limit}")
                 
-                # 429 에러 (Quota exceeded)인 경우 재시도
-                if "429" in error_str or "quota" in error_str.lower() or "rate limit" in error_str.lower():
-                    if attempt < max_retries - 1:
-                        # 에러 메시지에서 retry_delay 추출 시도
-                        retry_delay = 60  # 기본값 60초
-                        if "retry in" in error_str.lower():
-                            try:
-                                import re
-                                match = re.search(r'retry in ([\d.]+)s', error_str.lower())
-                                if match:
-                                    retry_delay = int(float(match.group(1))) + 1
-                            except:
-                                pass
-                        
-                        self.logger.warning(f"429 에러 발생 (Quota exceeded). {retry_delay}초 후 재시도 {attempt + 1}/{max_retries}...")
-                        time.sleep(retry_delay)
-                        continue
-                    else:
-                        self.logger.error(f"Gemini 요약 생성 실패 (최대 재시도 횟수 초과): {error_str[:500]}")
-                        return None
-                else:
-                    # 429가 아닌 다른 에러는 즉시 반환
-                    self.logger.error(f"Gemini 요약 생성 실패: {error_str[:500]}")
-                    return None
-        
-        return None
+                self.logger.warning(" - ".join(log_parts))
+                return (None, retry_delay)
+            else:
+                # 429가 아닌 다른 에러는 즉시 실패 반환
+                self.logger.error(f"Gemini 요약 생성 실패: {error_str[:500]}")
+                return (None, None)
 
     def run(self) -> None:
         """summary가 NULL인 포스트들을 찾아서 AI 요약을 생성하고 업데이트합니다."""
@@ -120,11 +193,33 @@ class AISummaryBatchService:
                     if existing_summary and existing_summary[0] is not None:
                         self.logger.info(f"[{idx}/{total_count}] post_id={post_id}: summary가 이미 존재하여 건너뜀")
                         continue
-
+                    
                     self.logger.info(f"[{idx}/{total_count}] post_id={post_id} 요약 생성 중...")
                     
-                    # Gemini로 요약 생성
-                    summary = self._gemini_summarize(content, title)
+                    # Gemini로 요약 생성 (재시도 로직 포함)
+                    max_retries = 3
+                    retry_count = 0
+                    summary = None
+                    
+                    while retry_count < max_retries:
+                        summary, retry_delay = self._gemini_summarize(content, title)
+                        
+                        if summary is not None:
+                            # 성공
+                            break
+                        elif retry_delay is not None:
+                            # 429 에러로 재시도 필요
+                            retry_count += 1
+                            if retry_count < max_retries:
+                                self.logger.info(f"[{idx}/{total_count}] post_id={post_id}: {retry_delay:.1f}초 후 재시도 {retry_count}/{max_retries - 1}...")
+                                time.sleep(retry_delay)
+                                continue
+                            else:
+                                self.logger.error(f"[{idx}/{total_count}] post_id={post_id}: 최대 재시도 횟수 초과")
+                                break
+                        else:
+                            # 다른 에러로 실패
+                            break
                     
                     # 요약 생성 실패 시 건너뛰기
                     if summary is None:
