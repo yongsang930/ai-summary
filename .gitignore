@@ -1,0 +1,56 @@
+# Environment variables
+requirements.txt
+*.sql
+logs/
+__pycache__/
+config.py
+.venv/
+
+# Essential
+node_modules/
+dist/
+build/
+
+# Environment Files
+.env
+.env.local
+.env.*.local
+.env.development
+.env.production
+
+# IDE / Editor
+.vscode/
+.idea/
+*.iml
+
+# System Files
+.DS_Store
+Thumbs.db
+*.log
+*.temp
+
+# Vite / Package Managers
+.vite/
+.npm/
+.yarn/
+.pnpm-store/
+.yarn/cache/
+.yarn/unplugged/
+.yarn/build-state.yml
+.yarn/install-state.gz
+
+# Testing
+coverage/
+*.lcov
+
+# Misc
+*.swp
+*.swo
+
+.Cursorrules
+
+.DS_Store
+Thumbs.db
+*.log
+
+.vite/
