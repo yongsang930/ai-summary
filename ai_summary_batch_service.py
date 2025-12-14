@@ -77,17 +77,19 @@ class AISummaryBatchService:
         if title:
             prompt_content = f"제목: {title}\n\n내용: {content}"
 
-        prompt = f"""당신은 한국어 기술 블로그 요약 전문가입니다.
+        prompt = f"""당신은 IT 전문가와 개발자들을 대상으로 하는 기술 블로그 요약 전문가입니다.
 
 요약 규칙:
 - 2~3개의 짧은 문장으로 요약
-- 목적, 핵심 아이디어, 주요 결과만 정리
+- 개발자 관점에서 기술적 핵심 내용에 집중
+- 사용된 기술 스택, 아키텍처, 구현 방법 등 실무적 정보 강조
+- 목적, 핵심 아이디어, 주요 결과를 개발자가 빠르게 파악할 수 있도록 정리
 - 불필요하게 길거나 난해한 표현 금지
 - 한 문장은 25~30자 이내로 자연스럽게
 - 마침표로 문장을 명확히 구분
-- 독자가 빠르게 내용을 이해할 수 있도록 단순하고 깔끔하게 작성
+- IT 전문가와 개발자들이 실무에 적용 가능한 정보를 빠르게 이해할 수 있도록 작성
 
-아래 글을 요약해주세요:
+아래 글을 개발자 관점에서 요약해주세요:
 
 {prompt_content}"""
 
@@ -211,8 +213,10 @@ class AISummaryBatchService:
                             # 429 에러로 재시도 필요
                             retry_count += 1
                             if retry_count < max_retries:
-                                self.logger.info(f"[{idx}/{total_count}] post_id={post_id}: {retry_delay:.1f}초 후 재시도 {retry_count}/{max_retries - 1}...")
-                                time.sleep(retry_delay)
+                                # 재시도 대기시간: 1회 60초, 2회 120초, 3회 180초 (60초씩 증가)
+                                wait_time = 60 * retry_count
+                                self.logger.info(f"[{idx}/{total_count}] post_id={post_id}: {wait_time}초 후 재시도 {retry_count}/{max_retries}...")
+                                time.sleep(wait_time)
                                 continue
                             else:
                                 self.logger.error(f"[{idx}/{total_count}] post_id={post_id}: 최대 재시도 횟수 초과")
@@ -235,7 +239,7 @@ class AISummaryBatchService:
                     conn.commit()
                     
                     success_count += 1
-                    self.logger.debug(f"  └─ 요약 완료: {summary[:100]}...")
+                    self.logger.debug(f"요약 완료: {summary[:100]}...")
                     
                 except Exception as e:
                     fail_count += 1
