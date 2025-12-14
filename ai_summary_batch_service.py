@@ -202,7 +202,13 @@ class AISummaryBatchService:
                     if summary is None and retry_delay is not None:
                         self.logger.info(f"[{idx}/{total_count}] post_id={post_id}: 429 에러 발생, 120초 후 1회 재시도...")
                         time.sleep(120)
-                        summary, retry_delay = self._gemini_summarize(content, title)
+                        summary, retry_delay_after_retry = self._gemini_summarize(content, title)
+                        
+                        # 재시도 후에도 429 에러가 발생하면 할당량 제한으로 판단하고 스크립트 종료
+                        if summary is None and retry_delay_after_retry is not None:
+                            self.logger.error(f"[{idx}/{total_count}] post_id={post_id}: 재시도 후에도 429 에러 발생. 할당량 제한으로 판단하여 스크립트를 종료합니다.")
+                            self.logger.info(f"처리 완료된 포스트: {success_count}건, 실패: {fail_count}건")
+                            return
                         
                         if summary is None:
                             self.logger.warning(f"[{idx}/{total_count}] post_id={post_id}: 재시도 후에도 실패, 다음 실행으로 넘어감")
@@ -211,10 +217,6 @@ class AISummaryBatchService:
                     if summary is None:
                         fail_count += 1
                         self.logger.warning(f"[{idx}/{total_count}] post_id={post_id}: 요약 생성 실패로 건너뜀")
-                        # 다음 요청 전 60초 대기 (마지막 요청이 아닌 경우)
-                        if idx < total_count:
-                            self.logger.info(f"[{idx}/{total_count}] 다음 요청 전 60초 대기 중...")
-                            time.sleep(60)
                         continue
                     
                     # DB 업데이트
@@ -227,21 +229,12 @@ class AISummaryBatchService:
                     success_count += 1
                     self.logger.debug(f"요약 완료: {summary[:100]}...")
                     
-                    # 이전 요청이 끝나고 1분 후 다음 요청 (마지막 요청이 아닌 경우)
-                    if idx < total_count:
-                        self.logger.info(f"[{idx}/{total_count}] 다음 요청 전 60초 대기 중...")
-                        time.sleep(60)
-                    
                 except Exception as e:
                     fail_count += 1
                     conn.rollback()
                     error_msg = str(e)[:500]
                     self.logger.error(f"[{idx}/{total_count}] post_id={post_id} 요약 실패: {error_msg}")
                     # 예외가 발생해도 다음 포스트로 계속 진행
-                    # 다음 요청 전 60초 대기 (마지막 요청이 아닌 경우)
-                    if idx < total_count:
-                        self.logger.info(f"[{idx}/{total_count}] 다음 요청 전 60초 대기 중...")
-                        time.sleep(60)
                     continue
 
             elapsed = time.time() - start_time
