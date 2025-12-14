@@ -94,9 +94,6 @@ class AISummaryBatchService:
 {prompt_content}"""
 
         try:
-            # API 요청 전 6초 대기
-            time.sleep(6)
-            
             response = self.model.generate_content(prompt)
             
             # 성공한 경우
@@ -199,36 +196,25 @@ class AISummaryBatchService:
                     self.logger.info(f"[{idx}/{total_count}] post_id={post_id} 요약 생성 중...")
                     
                     # Gemini로 요약 생성 (재시도 로직 포함)
-                    max_retries = 3
-                    retry_count = 0
-                    summary = None
+                    summary, retry_delay = self._gemini_summarize(content, title)
                     
-                    while retry_count < max_retries:
+                    # 429 에러인 경우에만 120초 대기 후 1회 재시도
+                    if summary is None and retry_delay is not None:
+                        self.logger.info(f"[{idx}/{total_count}] post_id={post_id}: 429 에러 발생, 120초 후 1회 재시도...")
+                        time.sleep(120)
                         summary, retry_delay = self._gemini_summarize(content, title)
                         
-                        if summary is not None:
-                            # 성공
-                            break
-                        elif retry_delay is not None:
-                            # 429 에러로 재시도 필요
-                            retry_count += 1
-                            if retry_count < max_retries:
-                                # 재시도 대기시간: 1회 60초, 2회 120초, 3회 180초 (60초씩 증가)
-                                wait_time = 60 * retry_count
-                                self.logger.info(f"[{idx}/{total_count}] post_id={post_id}: {wait_time}초 후 재시도 {retry_count}/{max_retries}...")
-                                time.sleep(wait_time)
-                                continue
-                            else:
-                                self.logger.error(f"[{idx}/{total_count}] post_id={post_id}: 최대 재시도 횟수 초과")
-                                break
-                        else:
-                            # 다른 에러로 실패
-                            break
+                        if summary is None:
+                            self.logger.warning(f"[{idx}/{total_count}] post_id={post_id}: 재시도 후에도 실패, 다음 실행으로 넘어감")
                     
                     # 요약 생성 실패 시 건너뛰기
                     if summary is None:
                         fail_count += 1
                         self.logger.warning(f"[{idx}/{total_count}] post_id={post_id}: 요약 생성 실패로 건너뜀")
+                        # 다음 요청 전 60초 대기 (마지막 요청이 아닌 경우)
+                        if idx < total_count:
+                            self.logger.info(f"[{idx}/{total_count}] 다음 요청 전 60초 대기 중...")
+                            time.sleep(60)
                         continue
                     
                     # DB 업데이트
@@ -241,12 +227,21 @@ class AISummaryBatchService:
                     success_count += 1
                     self.logger.debug(f"요약 완료: {summary[:100]}...")
                     
+                    # 이전 요청이 끝나고 1분 후 다음 요청 (마지막 요청이 아닌 경우)
+                    if idx < total_count:
+                        self.logger.info(f"[{idx}/{total_count}] 다음 요청 전 60초 대기 중...")
+                        time.sleep(60)
+                    
                 except Exception as e:
                     fail_count += 1
                     conn.rollback()
                     error_msg = str(e)[:500]
                     self.logger.error(f"[{idx}/{total_count}] post_id={post_id} 요약 실패: {error_msg}")
                     # 예외가 발생해도 다음 포스트로 계속 진행
+                    # 다음 요청 전 60초 대기 (마지막 요청이 아닌 경우)
+                    if idx < total_count:
+                        self.logger.info(f"[{idx}/{total_count}] 다음 요청 전 60초 대기 중...")
+                        time.sleep(60)
                     continue
 
             elapsed = time.time() - start_time
